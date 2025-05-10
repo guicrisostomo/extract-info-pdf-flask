@@ -233,3 +233,13 @@ async def verify_tesseract_endpoint():
         return {"status": "Tesseract is configured correctly"}
     else:
         raise HTTPException(500, "Tesseract configuration error")
+    
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        app, 
+        host="0.0.0.0",
+        port=8001,
+        log_level="info",
+        reload=False  # Desative o reload se necessário
+    )

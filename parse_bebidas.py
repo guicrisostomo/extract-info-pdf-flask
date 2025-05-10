@@ -49,11 +49,16 @@ def parse_bebidas(texto: str) -> List[Dict]:
             quantidade = partes[0].strip()
             descricao = partes[1].strip()
             preco = partes[2].strip() if partes[2] else None
-            
+            # Initialize sabores as an empty list
+            sabores = []
+            # Check for flavors in the next line
+            if linhas.index(linha) + 1 < len(linhas):
+                linha_sabor = linhas[linhas.index(linha) + 1].strip()
+                sabores.append(linha_sabor)
             bebida = {
                 "quantidade": quantidade,
                 "descricao": descricao,
-                "sabores": [],
+                "sabores": sabores,
                 "borda": None,
                 "preco": preco,
                 "tipo": "bebida"
@@ -65,11 +70,16 @@ def parse_bebidas(texto: str) -> List[Dict]:
             partes = padrao_linha_bebida.findall(linha)[0]
             descricao = partes[0].strip()
             preco = partes[1].strip() if partes[1] else None
-            
+            # Initialize sabores as an empty list
+            sabores = []
+            # Check for flavors in the next line
+            if linhas.index(linha) + 1 < len(linhas):
+                linha_sabor = linhas[linhas.index(linha) + 1].strip()
+                sabores.append(linha_sabor)
             bebida = {
                 "quantidade": None,
                 "descricao": descricao,
-                "sabores": [],
+                "sabores": sabores,
                 "borda": None,
                 "preco": preco,
                 "tipo": "bebida"
