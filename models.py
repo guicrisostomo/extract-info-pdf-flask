@@ -9,6 +9,7 @@ class ItemPedido(BaseModel):
     sabores: Optional[List[str]] = None
     borda: Optional[str] = None
     preco: str
+    tipo: Optional[str] = None
 
 class Endereco(BaseModel):
     rua: str
@@ -29,7 +30,9 @@ class PedidoResponse(BaseModel):
     origem: Optional[str] = None
     atendente: Optional[str] = None
     endereco: Optional[Endereco] = None
-    itens: List[ItemPedido]
+    # itens: List[ItemPedido]
+    tem_bebida: bool
+    lista_bebidas: Optional[List[ItemPedido]] = None
     total_itens: str
     taxa_entrega: Optional[str] = None
     valor_total: str

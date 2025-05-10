@@ -6,8 +6,8 @@ from pdf2image import convert_from_bytes
 import pytesseract
 import re
 import logging
-from get_products import parse_produtos
 from models import Endereco
+from parse_bebidas import parse_bebidas
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -105,11 +105,19 @@ def parse_campos(texto: str) -> Dict:
     cliente_match = re.search(r"CLIENTE:\s*(.+?)(?:\n|$)", texto)
     if cliente_match:
         resultado["cliente"] = cliente_match.group(1).strip().title()
+    
 
-    # Phone number (improved pattern)
-    telefone_match = re.search(r"TEL[:\s]*\(?(\d{2})\)?[\s-]*(\d{4,5})[\s-]*(\d{4})", texto)
+    email_match = re.search(r"EMAIL:\s*([^\n]+)", texto)
+    if email_match:
+        resultado["email"] = email_match.group(1).strip()
+
+    # Phone number (improved pattern): TEL: (16) 9-9345-3444
+    telefone_match = re.search(r"TEL:\s*([^\n]+)", texto)
     if telefone_match:
-        resultado["telefone"] = f"({telefone_match.group(1)}) {telefone_match.group(2)}-{telefone_match.group(3)}"
+        telefone = telefone_match.group(1).strip()
+        # Remove non-digit characters
+        telefone = re.sub(r'\D', '', telefone)
+        resultado["telefone"] = telefone
 
     # New customer flag
     resultado["novo_cliente"] = "NOVO CLIENTE" in texto
@@ -126,9 +134,13 @@ def parse_campos(texto: str) -> Dict:
     # Address (using the improved function)
     resultado["endereco"] = parse_endereco(texto)
 
+    linhas = [linha.strip() for linha in texto.splitlines()]
+    linhas = [linha for linha in linhas if linha]  # Remove linhas vazias
+
     # Items (using the improved function)
-    resultado["itens"] = parse_produtos(texto)
-    
+    resultado["lista_bebidas"] = parse_bebidas(texto)
+    resultado["tem_bebida"] = len(resultado["lista_bebidas"]) > 0
+    logger.info("Texto recebido para parsear bebidas: %s", texto)
     # Totals and payment
     total_itens_match = re.search(r"TOTAL ITENS:\s*([\d.,]+)", texto)
     if total_itens_match:
@@ -138,9 +150,14 @@ def parse_campos(texto: str) -> Dict:
     if taxa_match:
         resultado["taxa_entrega"] = taxa_match.group(1)
 
-    total_match = re.search(r"VALOR DO PEDIDO:\s*([\d.,]+)", texto)
-    if total_match:
-        resultado["valor_total"] = total_match.group(1)
+    valor_total_match = re.search(r"VALOR DO PEDIDO:\s*([\d.,]+)", texto)
+    if valor_total_match:
+        resultado["valor_total"] = valor_total_match.group(1)
+    else:
+        for linha in reversed(linhas):
+            if re.search(r"\d+,\d{2}", linha):
+                resultado["valor_total"] = re.search(r"(\d+,\d{2})", linha).group(1)
+                break
 
     payment_match = re.search(
         r'(?:FORMA\s*DE\s*PAGAMENTO|PAGAMENTO)\s*:\s*([^\n]+(?:\s+[^\n]+)*)', 
