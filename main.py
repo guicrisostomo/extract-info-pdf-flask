@@ -9,7 +9,11 @@ import logging
 from models import Endereco
 from parse_bebidas import parse_bebidas
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    filename="api_logs.txt",  # Nome do arquivo de log
+    level=logging.INFO,       # Nível de log
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
