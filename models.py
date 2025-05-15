@@ -19,6 +19,14 @@ class Endereco(BaseModel):
     estado: str
     complemento: Optional[str] = None
     cep: Optional[str] = None
+    prioridade: Optional[int] = 1
+    referencia: Optional[str] = None
+    datetime: Optional[datetime]
+    quantidade_pizzas: Optional[int] = 1
+    
+    @property
+    def endereco_completo(self):
+        return f"{self.rua}, {self.numero}, {self.bairro}".strip(", ")
 
 class PedidoResponse(BaseModel):
     tipo_venda: str
@@ -30,7 +38,6 @@ class PedidoResponse(BaseModel):
     origem: Optional[str] = None
     atendente: Optional[str] = None
     endereco: Optional[Endereco] = None
-    # itens: List[ItemPedido]
     tem_bebida: bool
     lista_bebidas: Optional[List[ItemPedido]] = None
     total_itens: str
@@ -39,3 +46,26 @@ class PedidoResponse(BaseModel):
     forma_pagamento: str
     tempo_entrega: Optional[str] = None
     observacoes: Optional[str] = None
+
+class Entrega(BaseModel):
+    street: str
+    number: str
+    district: str
+    quantidade_pizzas: int
+    prioridade: Optional[int] = 1
+
+    @property
+    def endereco_completo(self):
+        return f"{self.street}, {self.number}, {self.district}, Jardinópolis, SP"
+
+class RoterizacaoInput(BaseModel):
+    pizzaria: str
+    api_key: str
+    usuario_uids: List[str]  # Lista de UUIDs dos motoboys
+    capacidade_maxima: int = 4
+
+class TempoEstimadoInput(BaseModel):
+    api_key: str
+    pizzaria: str
+    tipo: Optional[str] = None  # "retirada", "entrega" ou None
+
