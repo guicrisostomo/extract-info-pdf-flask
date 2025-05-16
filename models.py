@@ -12,17 +12,21 @@ class ItemPedido(BaseModel):
     tipo: Optional[str] = None
 
 class Endereco(BaseModel):
+    id: Optional[int] = None
+    id_order: Optional[int] = None
     rua: str
     numero: str
-    bairro: str
+    bairro: Optional[str] = None
     cidade: str
     estado: str
     complemento: Optional[str] = None
     cep: Optional[str] = None
-    prioridade: Optional[int] = 1
+    prioridade: Optional[bool] = False
     referencia: Optional[str] = None
     datetime: Optional[datetime]
-    quantidade_pizzas: Optional[int] = 1
+    quantidade_pizzas: Optional[int] = 0
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     
     @property
     def endereco_completo(self):
@@ -63,6 +67,15 @@ class RoterizacaoInput(BaseModel):
     api_key: str
     usuario_uids: List[str]  # Lista de UUIDs dos motoboys
     capacidade_maxima: int = 4
+
+    def to_dict(self):
+        """Converte o objeto para um dicionário serializável em JSON."""
+        return {
+            "api_key": self.api_key,
+            "pizzaria": self.pizzaria,
+            "capacidade_maxima": self.capacidade_maxima,
+            "usuario_uids": self.usuario_uids,
+        }
 
 class TempoEstimadoInput(BaseModel):
     api_key: str

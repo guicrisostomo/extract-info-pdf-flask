@@ -1,2 +1,7 @@
 dist
 build
+
+*.env
+api_logs.txt
+dist.zip
+iniciar_gui.exe

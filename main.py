@@ -6,37 +6,30 @@ import ocrmypdf
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from typing import Optional, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi.responses import JSONResponse
 import openrouteservice
+from fila_celery import processar_roterizacao
+from funcoes_supabase import contar_pizzas_no_supabase
 from parse_items import parse_items
 from pdf2image import convert_from_bytes
 import pytesseract
 import re
 import logging
 import urllib
-from models import Endereco, Entrega, RoterizacaoInput, TempoEstimadoInput
-from supabase import create_client
+from models import Endereco, RoterizacaoInput,  TempoEstimadoInput
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-
+from tasks_helpers import buscar_enderecos_para_entrega
+from utils.geo import get_coordenadas, get_coordenadas_com_cache
+from celery_app import celery_app
+from load_files import supabase, logger
+from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(
-    filename="api_logs.txt",  # Nome do arquivo de log
-    level=logging.INFO,       # Nível de log
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
 app = FastAPI()
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 def verify_tesseract() -> bool:
     try:
         langs = pytesseract.get_languages(config='')
@@ -167,8 +160,7 @@ def extract_clean_payment(text: str) -> str:
         logger.error(f"Payment extraction error: {e}")
 
     return "Não Especificado"
-
-
+  
 def parse_campos(texto: str) -> Dict:
     texto = texto.upper()
     resultado = {}
@@ -341,129 +333,36 @@ async def verify_tesseract_endpoint():
     except Exception as e:
         logger.error(f"Tesseract verification failed: {e}")
         return False
-    
-def get_coordenadas(client, endereco):
-    try:
-        # Dividir o endereço em partes
-        partes = endereco.split(',')
-        street = partes[0].strip() if len(partes) > 0 else ""
-        number = partes[1].strip() if len(partes) > 1 else "S/N"  # Valor padrão "S/N" para sem número
-        district = partes[2].strip() if len(partes) > 2 else ""  # Valor padrão vazio para distrito
 
-        # Construir o endereço completo para consulta
-        endereco_completo = f"{street}, {number}, {district}, Jardinópolis, SP"
-        print(f"Consultando coordenadas para: {endereco_completo}")
-
-        # Fazer a consulta de coordenadas
-        response = client.pelias_search(text=endereco_completo)
-        if response and "features" in response and len(response["features"]) > 0:
-            coords = response["features"][0]["geometry"]["coordinates"]
-            return coords  # Retorna [longitude, latitude]
-
-        return None
-    except Exception as e:
-        print(f"Erro ao obter coordenadas para o endereço '{endereco}': {e}")
-        return None
+@app.get("/extrair-coordenadas")
+def get_coordenadas_route(client, endereco):
+    return get_coordenadas(client, endereco)
 
 def gerar_link_google_maps(paradas):
-    # Remove paradas vazias ou inválidas
-    paradas_validas = [p for p in paradas if p and isinstance(p, str)]
+    """
+    Gera um link para o Google Maps com as paradas formatadas corretamente.
+    """
+    paradas_validas = [
+        f"{p.latitude},{p.longitude}"
+        for p in paradas if p and isinstance(p, Endereco)
+    ]
     paradas_formatadas = [urllib.parse.quote_plus(p) for p in paradas_validas]
     return "https://www.google.com/maps/dir/" + "/".join(paradas_formatadas)
 
 def gerar_link_waze(paradas):
-    if not paradas:
-        return ""
-    destino = quote_plus(paradas[-1])
-    waypoints = [quote_plus(p) for p in paradas[:-1]]
-    return f"https://waze.com/ul?ll=&navigate=yes&to={destino}&via={'|'.join(waypoints)}"
-
-
-def contar_pizzas_no_supabase(id_order=None):
-    # 1. Buscar todos os itens válidos (com relation_id nulo) dos pedidos com status correto
-    query = supabase.table("items") \
-        .select("id_product, qtd") \
-        .is_("relation_id", None)
-
-    if id_order:
-        query = query.eq("id_order", id_order)
-    else:
-        query = query.in_("id_order", supabase.table("orders")
-                          .select("id")
-                          .in_("status", ["Pronto para entrega", "Quase pronto"])
-                          .execute()
-                          .data)
-
-    items_result = query.execute()
-
-    if not items_result.data:
-        return 0
-
-    # 2. Coletar todos os id_product usados
-    produtos_ativos = {}
-    for item in items_result.data:
-        id_prod = item["id_product"]
-        qtd = item.get("qtd", 1)
-        if id_prod:
-            produtos_ativos[id_prod] = produtos_ativos.get(id_prod, 0) + qtd
-
-    if not produtos_ativos:
-        return 0
-
-    # 3. Verificar se esses produtos são variações do tipo pizza
-    variations_result = supabase.table("variations") \
-        .select("id, category") \
-        .in_("id", list(produtos_ativos.keys())) \
-        .execute()
-
-    total_pizzas = 0
-    for var in variations_result.data:
-        categoria = var.get("category", "").lower()
-        if "pizza" in categoria:
-            total_pizzas += produtos_ativos.get(var["id"], 0)
-
-    return total_pizzas
+    """
+    Gera um array de links para o Waze com as paradas formatadas corretamente.
+    """
+    links = []
+    for p in paradas:
+        if p and isinstance(p, Endereco):
+            latitude = str(p.latitude)  # Converter latitude para string
+            longitude = str(p.longitude)  # Converter longitude para string
+            links.append(f"https://waze.com/ul?ll={quote_plus(latitude)},{quote_plus(longitude)}&navigate=yes&z=10&to=ll.{quote_plus(latitude)},{quote_plus(longitude)}")
+    return links
 
 
 
-def buscar_enderecos_para_entrega():
-    orders = supabase.table("orders") \
-        .select("id, address, prioritaria, datetime") \
-        .in_("status", ["Pronto para entrega", "Quase pronto"]) \
-        .execute()
-    print(f"Endereços encontrados: {orders.data}")
-    address_ids = [o["address"] for o in orders.data if o.get("address")]
-
-    if not address_ids:
-        return []
-
-    addresses = supabase.table("address") \
-        .select("id, street, number, district") \
-        .in_("id", address_ids) \
-        .execute()
-
-    entregas = []
-    for order in orders.data:
-        endereco = next((a for a in addresses.data if a["id"] == order["address"]), None)
-        if not endereco:
-            continue
-
-        order_datetime = datetime.fromisoformat(order["datetime"]) if order.get("datetime") else datetime.now()
-
-        entregas.append(Endereco(
-            rua=endereco["street"],
-            numero=str(endereco["number"]),
-            bairro=endereco["district"],
-            cidade="Jardinópolis",
-            estado="SP",
-            quantidade_pizzas=contar_pizzas_no_supabase(id_order=order["id"]),
-            prioridade=order.get("prioritaria", 1),
-            datetime=order_datetime  # Agora é um objeto datetime
-        ))
-
-    # Ordenar entregas: prioritaria=True primeiro, depois por datetime (mais antigo primeiro)
-    entregas.sort(key=lambda x: (x.prioridade, x.datetime) if hasattr(x, 'prioridade') else (1, datetime.max))
-    return entregas
   
 @app.post("/tempo-estimado")
 def tempo_estimado(data: TempoEstimadoInput):
@@ -482,19 +381,20 @@ def tempo_estimado(data: TempoEstimadoInput):
                 "tempo_total_min": tempo
             }
 
-        enderecos = buscar_enderecos_para_entrega()
+        enderecos = buscar_enderecos_para_entrega(data=data)
         tempo_entrega_min = 0
 
         if enderecos:
-            client = openrouteservice.Client(key=data.api_key, timeout=120)
-            coord_pizzaria = get_coordenadas(client, data.pizzaria)
+            
+            coord_pizzaria = get_coordenadas_com_cache(data.pizzaria, data)
             if not coord_pizzaria:
                 raise HTTPException(404, detail="Coordenadas da pizzaria não encontradas")
 
             for endereco in enderecos:
-                coord_cliente = get_coordenadas(client, endereco)
                 if not coord_cliente:
-                    continue
+                  coord_cliente = get_coordenadas_com_cache(data.pizzaria, data)
+                if not coord_cliente:
+                    raise HTTPException(404, detail=f"Coordenadas do cliente {endereco.id} não encontradas")
 
                 matrix = client.distance_matrix(
                     locations=[coord_pizzaria, coord_cliente],
@@ -543,143 +443,40 @@ def tempo_estimado(data: TempoEstimadoInput):
 
 # Atualização completa da rota /roterizacao: distribuir entre vários usuario_uids
 
+
+  
 @app.post("/roterizacao")
 def roterizacao(data: RoterizacaoInput):
     try:
-        client = openrouteservice.Client(key=data.api_key, timeout=(10, 60))
+        # Verificar se os dados estão no formato correto
+        if not isinstance(data, RoterizacaoInput):
+            raise HTTPException(400, "Dados de entrada inválidos")
+        if not data.api_key:
+            raise HTTPException(400, "API key não fornecida")
+        if not data.usuario_uids or len(data.usuario_uids) == 0:
+            raise HTTPException(400, "Nenhum motoboy fornecido")  
+        if not data.pizzaria:
+            raise HTTPException(400, "Informe o endereço da pizzaria")  
 
-        coord_pizzaria = get_coordenadas(client, data.pizzaria)
-        if not coord_pizzaria or len(coord_pizzaria) != 2:
-            raise HTTPException(404, detail="Coordenadas da pizzaria inválidas ou não encontradas")
-
-        entregas_restantes = buscar_enderecos_para_entrega()
-        if not entregas_restantes:
-            return {"viagens": [], "tempo_total_min": 0}
-        jobs = []
-        total_pizzas = 0
-        from datetime import datetime
-
-        # Recarregar prioridades a partir da tabela 'orders'
-        alerta_pedidos_vencidos = []
-        tempo_limite_segundos = 30 * 60  # 30 minutos
-
-        cache_orders = {}
-        for entrega in entregas_restantes:
-            address = getattr(entrega, 'address', None)
-            if address in cache_orders:
-                order = cache_orders[address]
-            else:
-                if not address:
-                    continue
-                order = {
-                    "prioritaria": entrega.prioridade,
-                    "datetime": entrega.datetime,
-                    "address": address
-                }
-                cache_orders[address] = order
-
-            if order:
-                if order["prioritaria"]:
-                    entrega.prioridade = 0
-                else:
-                    tempo_espera = (datetime.now() - datetime.fromisoformat(order["datetime"])).total_seconds()
-                    entrega.prioridade = int(tempo_espera)
-                    if tempo_espera > tempo_limite_segundos:
-                        alerta_pedidos_vencidos.append({
-                            "address": address,
-                            "tempo_espera_min": round(tempo_espera / 60, 1)
-                        })
-            else:
-                entrega.prioridade = 999
-
-        entregas_restantes.sort(key=lambda x: x.prioridade)
-        for idx, entrega in enumerate(entregas_restantes):
-            endereco = entrega.endereco_completo
-            coord = get_coordenadas(client, endereco)
-            if not coord or len(coord) != 2:
-                continue
-
-            query_address = supabase.table("address").select("id").eq("street", entrega.rua).eq("number", entrega.numero).eq("district", entrega.bairro).execute()
-            if not query_address.data:
-                continue
-
-            jobs.append({
-                "id": idx + 1,
-                "location": [float(coord[0]), float(coord[1])],
-                "amount": [entrega.quantidade_pizzas],
-                "service": 300,
-                "priority": getattr(entrega, 'prioridade', 999)
-            })
-            total_pizzas += entrega.quantidade_pizzas
-
-        if not jobs:
-            return {"viagens": [], "tempo_total_min": 0}
-
-        vehicles = []
-        for idx, uid in enumerate(data.usuario_uids):
-            vehicles.append({
-                "id": idx + 1,
-                "start": [float(coord_pizzaria[0]), float(coord_pizzaria[1])],
-                "end": [float(coord_pizzaria[0]), float(coord_pizzaria[1])],
-                "capacity": [999],
-                "time_window": [0, 28800],
-                "profile": "driving-car"
-            })
-
-        result = client.request(
-            "/optimization",
-            post_json={
-                "jobs": jobs,
-                "vehicles": vehicles,
-                "profile": "driving-car"
-            }
-        )
-
-        viagens = []
-        for rota in result['routes']:
-            entregador_idx = rota['vehicle'] - 1
-            if entregador_idx >= len(data.usuario_uids):
-                continue
-            entregador_uid = data.usuario_uids[entregador_idx]
-
-            steps = rota.get('steps', [])
-            rotas_veiculo = []
-            for step in steps:
-                if step['type'] == 'job':
-                    entrega = entregas_restantes[step['job'] - 1]
-                    rotas_veiculo.append(entrega.endereco_completo)
-
-            viagens.append({
-                "entregador": entregador_uid,
-                "tempo_estimado_min": round(rota['duration'] / 60, 1),
-                "distancia_km": round(rota.get('distance', 0) / 1000, 2),
-                "entregas": rotas_veiculo,
-                "link_google_maps": gerar_link_google_maps([data.pizzaria] + rotas_veiculo + [data.pizzaria]),
-                "link_waze": gerar_link_waze([data.pizzaria] + rotas_veiculo + [data.pizzaria]),
-                "tempo_estimado": str(timedelta(seconds=rota['duration'])),
-            })
-
-        tempo_total_min = sum([v["tempo_estimado_min"] for v in viagens])
-
-        # Notificar sobre pedidos vencidos (pode ser adaptado para envio real)
-        for alerta in alerta_pedidos_vencidos:
-            print(f"⚠️ Pedido atrasado! Endereço ID {alerta['address']} está esperando há {alerta['tempo_espera_min']} minutos.")
-
-        return {
-            "viagens": viagens,
-            "alertas_pedidos_vencidos": alerta_pedidos_vencidos,
-            "tempo_total_min": round(tempo_total_min, 1)
-        }
-
-    except openrouteservice.exceptions.ApiError as api_err:
-        raise HTTPException(status_code=400, detail=f"Erro na API ORS: {str(api_err)}")
+        task = processar_roterizacao.delay(data.to_dict())
+        return {"task_id": task.id}
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+        print(f"Erro ao processar roteirização: {e}")
+        return {"error": str(e)}
 
-
-
+@app.get("/roterizacao/status/{task_id}")
+def verificar_status(task_id: str):
+    from celery.result import AsyncResult
+    result = AsyncResult(task_id, app=celery_app)
+    if result.state == "PENDING":
+        return {"status": "PENDING"}
+    elif result.state == "SUCCESS":
+        return {"status": "SUCCESS", "result": result.result}
+    elif result.state == "FAILURE":
+        return {"status": "FAILURE", "error": str(result.result)}
+    else:
+        return {"status": result.state}
+      
 @app.post("/upload-planilha/")
 async def upload_planilha(file: UploadFile = File(...)):
     if not file.filename.endswith(".xlsx"):

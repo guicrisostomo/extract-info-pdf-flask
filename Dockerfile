@@ -19,7 +19,6 @@ RUN apt-get update && apt-get install -y \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-
 # Etapa 3: Cria diretório de trabalho
 WORKDIR /app
 
@@ -29,7 +28,6 @@ COPY . .
 # Etapa 5: Instala dependências Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
 
 # Etapa 6: Define a porta padrão
 EXPOSE 8001
