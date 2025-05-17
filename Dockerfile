@@ -17,6 +17,10 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     libpoppler-cpp-dev \
     gcc \
+    libpq-dev \
+    curl \
+    supervisor \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Etapa 3: Cria diretório de trabalho
@@ -29,8 +33,9 @@ COPY . .
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Etapa 6: Define a porta padrão
-EXPOSE 8001
+RUN mkdir -p /var/log/supervisor
 
 # Etapa 7: Comando de execução
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+CMD ["/usr/bin/supervisord"]

@@ -12,6 +12,7 @@ pymupdf  # PyMuPDF
 supabase
 openpyxl
 python-multipart
-celery[redis]==5.3.1
-redis==5.0.0
-openrouteservice==2.3.0
+celery
+redis
+openrouteservice
+websocket-client

@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import List, Optional
+import uuid
 from pydantic import BaseModel
 
 
@@ -21,7 +22,7 @@ class Endereco(BaseModel):
     estado: str
     complemento: Optional[str] = None
     cep: Optional[str] = None
-    prioridade: Optional[bool] = False
+    prioridade: Optional[bool | int] = 0
     referencia: Optional[str] = None
     datetime: Optional[datetime]
     quantidade_pizzas: Optional[int] = 0
@@ -65,7 +66,7 @@ class Entrega(BaseModel):
 class RoterizacaoInput(BaseModel):
     pizzaria: str
     api_key: str
-    usuario_uids: List[str]  # Lista de UUIDs dos motoboys
+    usuario_uids: Optional[List[uuid.UUID]] = []  # Lista de UUIDs dos motoboys
     capacidade_maxima: int = 4
 
     def to_dict(self):

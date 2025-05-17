@@ -1,15 +1,19 @@
 from datetime import datetime
+import uuid
 import openrouteservice
 from load_files import supabase
 from funcoes_supabase import contar_pizzas_no_supabase
 from models import Endereco, RoterizacaoInput
 from utils.geo import get_coordenadas_com_cache
 
-
-async def buscar_enderecos_para_entrega(data: RoterizacaoInput) -> list[Endereco]:
+def entregador_ocioso(motoboy_uid: uuid.UUID) -> bool:
+    rotas_ativas = supabase.table("routes").select("id").eq("motoboy_uid", motoboy_uid).eq("concluido", False).execute()
+    return len(rotas_ativas.data) == 0
+  
+def buscar_enderecos_para_entrega(data: RoterizacaoInput) -> list[Endereco]:
     orders = supabase.table("orders") \
         .select("id, address, prioritaria, datetime") \
-        .in_("status", ["Pronto para entrega", "Quase pronta"]) \
+        .in_("status", ["Pronto para entrega", "Quase pronta", "Entregador definido"]) \
         .order("prioritaria", desc=True) \
         .order("datetime", desc=False) \
         .execute()
@@ -31,7 +35,7 @@ async def buscar_enderecos_para_entrega(data: RoterizacaoInput) -> list[Endereco
       if not endereco:
           continue
 
-      coordenadas_cliente = get_coordenadas_com_cache(f"{endereco['street']}, {endereco['number']}, {endereco['district']}, Jardinópolis, SP", data=data)
+      coordenadas_cliente = get_coordenadas_com_cache(f"{endereco['street']}, {endereco['number']}, {endereco['district']}, Jardinópolis, SP", api_key=data.api_key)
       if coordenadas_cliente and (endereco["latitude"] != coordenadas_cliente[0] or endereco["longitude"] != coordenadas_cliente[1]):
           # Atualizar coordenadas no banco de dados
           supabase.table("address").update({
@@ -45,7 +49,7 @@ async def buscar_enderecos_para_entrega(data: RoterizacaoInput) -> list[Endereco
 
       order_datetime = datetime.fromisoformat(order["datetime"]) if order.get("datetime") else datetime.now()
 
-      qtd_pizza = await contar_pizzas_no_supabase(id_order=order["id"])
+      qtd_pizza = contar_pizzas_no_supabase(id_order=order["id"])
       entregas.append(Endereco(
           id=endereco["id"],
           id_order=order["id"],
@@ -56,7 +60,6 @@ async def buscar_enderecos_para_entrega(data: RoterizacaoInput) -> list[Endereco
           estado="SP",
           quantidade_pizzas=qtd_pizza,
           prioridade=order["prioritaria"],
-          endereco_completo=f"{endereco['street']}, {endereco['number']}, {endereco['district']}, Jardinópolis, SP",
           datetime=order_datetime,
           latitude=coordenadas_cliente[0],
           longitude=coordenadas_cliente[1]

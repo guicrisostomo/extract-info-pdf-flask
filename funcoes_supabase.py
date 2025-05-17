@@ -1,6 +1,6 @@
 from load_files import supabase
 
-def contar_pizzas_no_supabase(id_order=None):
+def contar_pizzas_no_supabase(id_order: int | None = None):
     # 1. Buscar todos os itens válidos (com relation_id nulo) dos pedidos com status correto
     query = supabase.table("items") \
         .select("id_product, qtd") \

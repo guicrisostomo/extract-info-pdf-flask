@@ -13,6 +13,21 @@ services:
     depends_on:
       - db
       - redis
+    working_dir: /app
+
+  worker:
+    build: .
+    command: celery -A celery_app worker --loglevel=info
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+      - db
+    working_dir: /app
+    environment:
+      - PYTHONPATH=/app
+    env_file:
+      - .env
 
   db:
     image: postgres:15
@@ -37,11 +52,13 @@ services:
   celery:
     build: .
     container_name: celery_worker
-    command: celery -A fila_celery worker --loglevel=info
+    command: celery -A celery_app worker --loglevel=info
+    working_dir: /app
     depends_on:
       - redis
       - app
     environment:
+      - PYTHONPATH=/app
       - HTTP_PROXY=
       - HTTPS_PROXY=
       - NO_PROXY=localhost,127.0.0.1,host.docker.internal

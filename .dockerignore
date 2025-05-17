@@ -4,4 +4,3 @@ __pycache__/
 *.pyd
 *.log
 *.sqlite3
-.env

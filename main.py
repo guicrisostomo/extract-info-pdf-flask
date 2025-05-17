@@ -1,16 +1,22 @@
 import asyncio
 from io import BytesIO
+import json
 import os
+import threading
+import time
 from urllib.parse import quote_plus
+import uuid
 import ocrmypdf
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket
 from typing import Optional, Dict
 from datetime import datetime, timezone
 
 from fastapi.responses import JSONResponse
 import openrouteservice
-from fila_celery import processar_roterizacao
+import websocket
+import websockets
+from tasks.fila_celery import reatribuir_entregas_para_motoboy_ocioso
 from funcoes_supabase import contar_pizzas_no_supabase
 from parse_items import parse_items
 from pdf2image import convert_from_bytes
@@ -23,8 +29,8 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from tasks_helpers import buscar_enderecos_para_entrega
 from utils.geo import get_coordenadas, get_coordenadas_com_cache
-from celery_app import celery_app
-from load_files import supabase, logger
+from celery_app import app as celery_app
+from load_files import SUPABASE_KEY, SUPABASE_URL, supabase, logger
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -44,42 +50,96 @@ def verify_tesseract() -> bool:
 from tempfile import NamedTemporaryFile
 import fitz  # PyMuPDF
 
-def extrair_texto_ocr(pdf_bytes: bytes) -> str:
+import asyncio
+
+STATUS_VALIDOS = {"Pronto para entrega", "Quase pronta", "Entregador definido"}
+
+clients = []
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    clients.append(websocket)
     try:
-        # Salva PDF temporário
-        with NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-            temp_pdf.write(pdf_bytes)
-            temp_pdf_path = temp_pdf.name
+        while True:
+            await asyncio.sleep(1)
+    except:
+        clients.remove(websocket)
 
-        # Aplica OCR com ocrmypdf
-        with NamedTemporaryFile(delete=False, suffix=".pdf") as temp_output_pdf:
-            temp_output_path = temp_output_pdf.name
+def broadcast_to_clients(message):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    coros = [client.send_text(message) for client in clients]
+    loop.run_until_complete(asyncio.gather(*coros))
 
-        ocrmypdf.ocr(
-            input_file=temp_pdf_path,
-            output_file=temp_output_path,
-            language='por',
-            force_ocr=True,
-            deskew=True,
-            rotate_pages=True,
-            optimize=3
-        )
+def on_message(ws, message):
+    data = json.loads(message)
+    print(f"Mensagem recebida: {data}")
+    logger.info(f"Mensagem recebida: {data}")
+    if data.get("event") == "postgres_changes":
+        payload = data["payload"]
+        # Corrigido para acessar o novo registro
+        record = payload["data"]["record"]
+        status = record.get("status")
+        order_id = record.get("id")
+        broadcast_to_clients(f"Pedido {order_id} atualizado para {status}")
+        if status in STATUS_VALIDOS:
+            reatribuir_entregas_para_motoboy_ocioso.delay(
+                api_key=SUPABASE_KEY,
+                pizzaria="Avenida Belarmino Pereira de Oliveira, 429, Vila Oliveira",
+                capacidade_maxima=4
+            )
+        else:
+            print(f"Status inválido recebido: {status}")
 
-        # Extração textual via PyMuPDF (mais confiável que OCR visual quando possível)
-        texto_total = ""
-        with fitz.open(temp_output_path) as doc:
-            for page in doc:
-                texto_total += page.get_text()
+def on_open(ws):
+    print("Conectado ao Realtime Supabase")
+    logger.info("Conectado ao Realtime Supabase")
+    ws.send(json.dumps({
+        "event": "phx_join",
+        "topic": "realtime:public:orders",
+        "payload": {
+            "config": {
+                "broadcast": {"self": False},
+                "presence": {},
+                "postgres_changes": [
+                    {
+                        "event": "UPDATE",
+                        "schema": "public",
+                        "table": "orders",
+                        "filter": "status=neq.null"
+                    }
+                ],
+            }
+        },
+        "ref": "1"
+    }))
 
-        if not texto_total.strip():
-            raise RuntimeError("Texto OCR vazio")
+def start_realtime():
+    if SUPABASE_KEY is None or SUPABASE_URL is None:
+        logger.error("SUPABASE_KEY or SUPABASE_URL not set in environment variables.")
+        return
+    realtime_url = f"wss://{SUPABASE_URL.replace('https://', '')}/realtime/v1/websocket?apikey={SUPABASE_KEY}"
+    logger.info(f"Conectando ao websocket: {realtime_url}")
+    while True:
+        try:
+            ws = websocket.WebSocketApp(
+                realtime_url,
+                on_open=on_open,
+                on_message=on_message
+            )
+            ws.run_forever()
+        except Exception as e:
+            logger.error(f"Erro no websocket: {e}")
+        # Aguarda 10 segundos antes de tentar reconectar
+        time.sleep(10)
+# ... (restante dos imports e código)
 
-        return texto_total
+# Dicionário para guardar o último estado das rotas por motoboy
+last_routes_state = {}
 
-    except Exception as e:
-        logger.error(f"Falha na extração OCR: {e}")
-        raise
 
+# Inicie o listener no startup do FastAPI
 
 def parse_endereco(texto: str) -> Optional[Endereco]:
     # Improved address parsing with multiple patterns
@@ -103,7 +163,8 @@ def parse_endereco(texto: str) -> Optional[Endereco]:
         bairro=match.group(3).strip(),
         cidade=match.group(4).strip(),
         estado=match.group(5).strip(),
-        complemento=match.group(6).strip() if match.group(6) else None
+        complemento=match.group(6).strip() if match.group(6) else None,
+        datetime=datetime.now(timezone.utc),
     )
 
 def extrair_telefone(texto: str) -> str:
@@ -217,7 +278,7 @@ def parse_campos(texto: str) -> Dict:
     else:
         for linha in reversed(linhas):
             if re.search(r"\d+,\d{2}", linha):
-                resultado["valor_total"] = re.search(r"(\d+,\d{2})", linha).group(1)
+                resultado["valor_total"] = re.search(r"(\d+,\d{2})", linha).group(1) # type: ignore
                 break
 
     payment_match = re.search(r'(?:FORMA\s*DE\s*PAGAMENTO|PAGAMENTO)\s*:\s*([^\n]+)', texto)
@@ -265,7 +326,7 @@ def extrair_texto_ocr(pdf_bytes: bytes) -> str:
         texto_final = ""
         with fitz.open(temp_output_path) as doc:
             for page in doc:
-                texto_final += page.get_text("text")
+                texto_final += page.get_text("text") # type: ignore
 
         if not texto_final.strip():
             print("[Fallback OCR] Extraindo diretamente com pytesseract...")
@@ -346,7 +407,7 @@ def gerar_link_google_maps(paradas):
         f"{p.latitude},{p.longitude}"
         for p in paradas if p and isinstance(p, Endereco)
     ]
-    paradas_formatadas = [urllib.parse.quote_plus(p) for p in paradas_validas]
+    paradas_formatadas = [urllib.parse.quote_plus(p) for p in paradas_validas] # type: ignore
     return "https://www.google.com/maps/dir/" + "/".join(paradas_formatadas)
 
 def gerar_link_waze(paradas):
@@ -366,87 +427,94 @@ def gerar_link_waze(paradas):
   
 @app.post("/tempo-estimado")
 def tempo_estimado(data: TempoEstimadoInput):
-    try:
-        num_pizzas = contar_pizzas_no_supabase()
-        tempo_preparo = max(15, num_pizzas * 2 + 7)
+    pass
+    # try:
+    #     num_pizzas = contar_pizzas_no_supabase()
+    #     tempo_preparo = max(15, num_pizzas * 2 + 7)
 
-        tipo = data.tipo.lower() if data.tipo else None
-        resultados = {}
+    #     tipo = data.tipo.lower() if data.tipo else None
+    #     resultados = {}
 
-        if tipo == "retirada":
-            tempo = tempo_preparo if num_pizzas > 0 else 20
-            return {
-                "tipo": "retirada",
-                "tempo_preparo_min": tempo,
-                "tempo_total_min": tempo
-            }
+    #     if tipo == "retirada":
+    #         tempo = tempo_preparo se num_pizzas > 0 else 20
+    #         return {
+    #             "tipo": "retirada",
+    #             "tempo_preparo_min": tempo,
+    #             "tempo_total_min": tempo
+    #         }
 
-        enderecos = buscar_enderecos_para_entrega(data=data)
-        tempo_entrega_min = 0
+    #     enderecos = buscar_enderecos_para_entrega(data=data)
+    #     tempo_entrega_min = 0
 
-        if enderecos:
+    #     if enderecos:
             
-            coord_pizzaria = get_coordenadas_com_cache(data.pizzaria, data)
-            if not coord_pizzaria:
-                raise HTTPException(404, detail="Coordenadas da pizzaria não encontradas")
+    #         coord_pizzaria = get_coordenadas_com_cache(data.pizzaria, data)
+    #         if not coord_pizzaria:
+    #             raise HTTPException(404, detail="Coordenadas da pizzaria não encontradas")
 
-            for endereco in enderecos:
-                if not coord_cliente:
-                  coord_cliente = get_coordenadas_com_cache(data.pizzaria, data)
-                if not coord_cliente:
-                    raise HTTPException(404, detail=f"Coordenadas do cliente {endereco.id} não encontradas")
+    #         for endereco in enderecos:
+    #             if not coord_cliente:
+    #               coord_cliente = get_coordenadas_com_cache(data.pizzaria, data)
+    #             if not coord_cliente:
+    #                 raise HTTPException(404, detail=f"Coordenadas do cliente {endereco.id} não encontradas")
 
-                matrix = client.distance_matrix(
-                    locations=[coord_pizzaria, coord_cliente],
-                    profile='driving-car',
-                    metrics=['duration'],
-                    units='km'
-                )
-                duracao = matrix['durations'][0][1] / 60 + matrix['durations'][1][0] / 60 + 5
-                tempo_entrega_min += duracao
+    #             matrix = client.distance_matrix(
+    #                 locations=[coord_pizzaria, coord_cliente],
+    #                 profile='driving-car',
+    #                 metrics=['duration'],
+    #                 units='km'
+    #             )
+    #             duracao = matrix['durations'][0][1] / 60 + matrix['durations'][1][0] / 60 + 5
+    #             tempo_entrega_min += duracao
 
-        tempo_entrega_total = (
-            round(tempo_preparo + tempo_entrega_min, 1)
-            if num_pizzas > 0 else 40
-        )
+    #     tempo_entrega_total = (
+    #         round(tempo_preparo + tempo_entrega_min, 1)
+    #         se num_pizzas > 0 else 40
+    #     )
 
-        if tipo == "entrega":
-            return {
-                "tipo": "entrega",
-                "tempo_preparo_min": tempo_preparo if num_pizzas > 0 else 0,
-                "tempo_entrega_min": round(tempo_entrega_min, 1) if num_pizzas > 0 else 40,
-                "tempo_total_min": tempo_entrega_total
-            }
+    #     se tipo == "entrega":
+    #         return {
+    #             "tipo": "entrega",
+    #             "tempo_preparo_min": tempo_preparo se num_pizzas > 0 else 0,
+    #             "tempo_entrega_min": round(tempo_entrega_min, 1) se num_pizzas > 0 else 40,
+    #             "tempo_total_min": tempo_entrega_total
+    #         }
 
-        # Se tipo não foi enviado, retorna os dois
-        resultados["retirada"] = {
-            "tempo_preparo_min": tempo_preparo if num_pizzas > 0 else 20,
-            "tempo_total_min": tempo_preparo if num_pizzas > 0 else 20
-        }
+    #     # Se tipo não foi enviado, retorna os dois
+    #     resultados["retirada"] = {
+    #         "tempo_preparo_min": tempo_preparo se num_pizzas > 0 else 20,
+    #         "tempo_total_min": tempo_preparo se num_pizzas > 0 else 20
+    #     }
 
-        resultados["entrega"] = {
-            "tempo_preparo_min": tempo_preparo if num_pizzas > 0 else 0,
-            "tempo_entrega_min": round(tempo_entrega_min, 1) if num_pizzas > 0 else 40,
-            "tempo_total_min": tempo_entrega_total
-        }
+    #     resultados["entrega"] = {
+    #         "tempo_preparo_min": tempo_preparo se num_pizzas > 0 else 0,
+    #         "tempo_entrega_min": round(tempo_entrega_min, 1) se num_pizzas > 0 else 40,
+    #         "tempo_total_min": tempo_entrega_total
+    #     }
 
-        return resultados
+    #     return resultados
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(500, detail=f"Erro interno: {str(e)}")
+    # except Exception as e:
+    #     import traceback
+    #     traceback.print_exc()
+    #     raise HTTPException(500, detail=f"Erro interno: {str(e)}")
 
 
-
-# Atualização completa da rota /roterizacao: distribuir entre vários usuario_uids
 
 # Atualização completa da rota /roterizacao: distribuir entre vários usuario_uids
 
+# Atualização completa da rota /roterizacao: distribuir entre vários usuario_uids
+def is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except ValueError:
+        return False
 
   
 @app.post("/roterizacao")
 def roterizacao(data: RoterizacaoInput):
+    print(f"Dados recebidos: {data}")
     try:
         # Verificar se os dados estão no formato correto
         if not isinstance(data, RoterizacaoInput):
@@ -458,12 +526,36 @@ def roterizacao(data: RoterizacaoInput):
         if not data.pizzaria:
             raise HTTPException(400, "Informe o endereço da pizzaria")  
 
-        task = processar_roterizacao.delay(data.to_dict())
+        task = reatribuir_entregas_para_motoboy_ocioso.delay(
+          api_key=data.api_key,
+            pizzaria=data.pizzaria,
+            capacidade_maxima=data.capacidade_maxima
+        )
         return {"task_id": task.id}
     except Exception as e:
         print(f"Erro ao processar roteirização: {e}")
+        logger.error(f"Erro ao processar roteirização: {e}")
         return {"error": str(e)}
 
+@app.post("/roterizacao/inicio_entrega/{motoboy_uid}")
+def iniciar_entrega(motoboy_uid: str):
+    if not motoboy_uid:
+        raise HTTPException(status_code=400, detail="Motoboy UID não enviado")
+
+    supabase.table("routes").update({"started": True, "in_progress": True}) \
+        .eq("motoboy_uid", motoboy_uid).execute()
+
+    return {"status": "ok", "message": "Entrega iniciada com sucesso"}
+
+@app.post("/roterizacao/finalizar_entrega/{motoboy_uid}")
+def finalizar_entrega(motoboy_uid: str):
+    if not motoboy_uid:
+        raise HTTPException(status_code=400, detail="Motoboy UID não enviado")
+
+    supabase.table("routes").delete().eq("motoboy_uid", motoboy_uid).eq("in_progress", True).execute()
+
+    return {"status": "ok", "message": "Entrega finalizada com sucesso"}
+  
 @app.get("/roterizacao/status/{task_id}")
 def verificar_status(task_id: str):
     from celery.result import AsyncResult
@@ -477,9 +569,38 @@ def verificar_status(task_id: str):
     else:
         return {"status": result.state}
       
+@app.get("/roterizacao/entregas")
+def listar_entregas():
+    entregas = supabase.table("routes").select("*").execute().data
+    return {"entregas": entregas}
+
+@app.post("/checkin")
+def checkin(motoboy_uid: str):
+    if not motoboy_uid:
+        raise HTTPException(status_code=400, detail="Motoboy UID não enviado")
+
+    supabase.table("motoboy_checkins").insert({
+        "motoboy_uid": motoboy_uid,
+        "checkin_time": datetime.now(timezone.utc).isoformat()
+    }).execute()
+
+    return {"status": "ok", "message": "Check-in realizado com sucesso"}
+
+@app.patch("/pedido_entregue/{order_id}")
+def marcar_entrega_concluida(order_id: int):
+    # Marca a entrega como entregue
+    supabase.table("route_deliveries").update({"entregue": True}) \
+        .eq("order_id", order_id).execute()
+
+    # Atualiza status do pedido
+    supabase.table("orders").update({"status": "Entregue"}) \
+        .eq("id", order_id).execute()
+
+    print(f"✅ Pedido {order_id} marcado como entregue")
+    return {"status": "ok", "message": "Entrega marcada como concluída"}
 @app.post("/upload-planilha/")
-async def upload_planilha(file: UploadFile = File(...)):
-    if not file.filename.endswith(".xlsx"):
+async def upload_planilha_excel(file: UploadFile = File(...)):
+    if not file.filename == None and file.filename.endswith(".xlsx"):
         return JSONResponse(status_code=400, content={"error": "Arquivo deve ser .xlsx"})
 
     contents = await file.read()
@@ -534,7 +655,7 @@ async def upload_planilha(file: UploadFile = File(...)):
 
 @app.post("/upload/")
 async def upload_planilha(file: UploadFile = File(...)):
-    if not file.filename.endswith(".xlsx"):
+    if not file.filename == None and file.filename.endswith(".xlsx"):
         return JSONResponse(status_code=400, content={"error": "Arquivo deve ser .xlsx"})
 
     contents = await file.read()
@@ -601,8 +722,8 @@ async def upload_planilha(file: UploadFile = File(...)):
 
         try:
             product_response = supabase.table("products").insert(product_data).execute()
-            if product_response.error:
-                print(f"Erro ao inserir produto {nome_produto}: {product_response.error.message}")
+            if product_response.error: # type: ignore
+                print(f"Erro ao inserir produto {nome_produto}: {product_response.error.message}") # type: ignore
                 continue
         except Exception as e:
             print(f"Erro ao inserir produto {nome_produto}: {str(e)}")
@@ -614,13 +735,7 @@ async def upload_planilha(file: UploadFile = File(...)):
         "importados": produtos_importados,
         "ignorados": list(nomes_cadastrados)
     }
-    
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        app, 
-        host="0.0.0.0",
-        port=8001,
-        log_level="info",
-        reload=False  # Desative o reload se necessário
-    )
+
+@app.on_event("startup")
+def start_realtime_on_startup():
+    threading.Thread(target=start_realtime, daemon=True).start()
