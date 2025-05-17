@@ -11,7 +11,7 @@ def contar_pizzas_no_supabase(id_order: int | None = None):
     else:
         query = query.in_("id_order", supabase.table("orders")
                           .select("id")
-                          .in_("status", ["Pronto para entrega", "Quase pronto"])
+                          .in_("status", ["Pronto para entrega", "Quase pronta"])
                           .execute()
                           .data)
 
