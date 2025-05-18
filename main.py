@@ -52,7 +52,7 @@ import fitz  # PyMuPDF
 
 import asyncio
 
-STATUS_VALIDOS = {"Pronto para entrega", "Quase pronta", "Entregador definido"}
+STATUS_VALIDOS = {"Pronto para entrega", "Quase pronta", "Entregador definido", "Saiu para entrega", "Entregue"}
 
 clients = []
 
