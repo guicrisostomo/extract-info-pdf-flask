@@ -85,7 +85,7 @@ def on_message(ws, message):
         broadcast_to_clients(f"Pedido {order_id} atualizado para {status}")
         if status in STATUS_VALIDOS:
             reatribuir_entregas_para_motoboy_ocioso.delay(
-                api_key=SUPABASE_KEY,
+                api_key=os.getenv("OPENROUTE_API_KEY"),
                 pizzaria="Avenida Belarmino Pereira de Oliveira, 429, Vila Oliveira",
                 capacidade_maxima=4
             )
