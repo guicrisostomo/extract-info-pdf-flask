@@ -13,22 +13,17 @@ from typing import Optional, Dict
 from datetime import datetime, timezone
 
 from fastapi.responses import JSONResponse
-import openrouteservice
 import websocket
-import websockets
 from tasks.fila_celery import reatribuir_entregas_para_motoboy_ocioso
-from funcoes_supabase import contar_pizzas_no_supabase
 from parse_items import parse_items
 from pdf2image import convert_from_bytes
 import pytesseract
 import re
-import logging
 import urllib
 from models import Endereco, RoterizacaoInput,  TempoEstimadoInput
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
-from tasks_helpers import buscar_enderecos_para_entrega
-from utils.geo import get_coordenadas, get_coordenadas_com_cache
+from datetime import datetime
+from utils.geo import get_coordenadas
 from celery_app import app as celery_app
 from load_files import SUPABASE_KEY, SUPABASE_URL, supabase, logger
 from dotenv import load_dotenv
@@ -142,28 +137,31 @@ last_routes_state = {}
 # Inicie o listener no startup do FastAPI
 
 def parse_endereco(texto: str) -> Optional[Endereco]:
-    # Improved address parsing with multiple patterns
     padrao_endereco = re.compile(
-        r"ENDEREÇO:\s*(.*?)\s*"  # Street
-        r"(\d+)[,\s]*"            # Number
-        r"([^,]+?)\s*,\s*"        # Neighborhood
-        r"([^/]+?)\s*/\s*"        # City
-        r"([A-Z]{2})"             # State
-        r"(?:\s*-\s*(.*))?",      # Optional complement
-        re.IGNORECASE | re.DOTALL
+        r"ENDEREÇO:\s*([^,]+),\s*(\d+)(?:\s*\(([^)]+)\))?,\s*([^,]+),\s*([^/]+)/([A-Z]{2})",
+        flags=re.IGNORECASE
     )
-    
+
     match = padrao_endereco.search(texto)
     if not match:
         return None
-        
+
+    rua = match.group(1).replace(",", "").strip()
+    numero = match.group(2).strip()
+    referencia = match.group(3).strip() if match.group(3) else None
+    bairro = match.group(4).strip()
+    cidade = match.group(5).strip()
+    estado = match.group(6).strip()
+
+    complemento = f"Referência: {referencia}" if referencia else None
+
     return Endereco(
-        rua=match.group(1).strip(),
-        numero=match.group(2).strip(),
-        bairro=match.group(3).strip(),
-        cidade=match.group(4).strip(),
-        estado=match.group(5).strip(),
-        complemento=match.group(6).strip() if match.group(6) else None,
+        rua=rua,
+        numero=numero,
+        bairro=bairro,
+        cidade=cidade,
+        estado=estado,
+        complemento=complemento,
         datetime=datetime.now(timezone.utc),
     )
 
@@ -226,7 +224,7 @@ def parse_campos(texto: str) -> Dict:
     texto = texto.upper()
     resultado = {}
 
-    tipo_match = re.search(r"(ENTREGA|RETIRAR|BALCÃO|MESA)\s*(\d{1,5})?", texto)
+    tipo_match = re.search(r"(ENTREGA|RETIRAR|BALCAO|MESA)\s*(\d{1,5})?", texto)
     if tipo_match:
         resultado["tipo_venda"] = tipo_match.group(1).capitalize()
         if tipo_match.group(2):
@@ -272,9 +270,10 @@ def parse_campos(texto: str) -> Dict:
     if taxa_match:
         resultado["taxa_entrega"] = taxa_match.group(1)
 
-    valor_total_match = re.search(r"VALOR DO PEDIDO:\s*([\d.,]+)", texto)
+    valor_total_match = re.search(r"VALOR\s*DO\s*PEDIDO:\s*(R\$)?\s*([^\n]+)", texto)
+    
     if valor_total_match:
-        resultado["valor_total"] = valor_total_match.group(1)
+        resultado["valor_total"] = valor_total_match.group(2).strip()
     else:
         for linha in reversed(linhas):
             if re.search(r"\d+,\d{2}", linha):
@@ -739,3 +738,10 @@ async def upload_planilha(file: UploadFile = File(...)):
 @app.on_event("startup")
 def start_realtime_on_startup():
     threading.Thread(target=start_realtime, daemon=True).start()
+
+import sys
+import traceback
+
+def excepthook(type, value, tb):
+    print("".join(traceback.format_exception(type, value, tb)), file=sys.stderr)
+sys.excepthook = excepthook
