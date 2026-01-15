@@ -25,6 +25,10 @@ def parse_items(linhas: List[str]) -> List[Dict]:
 
     item_atual = None
 
+    aguardando_borda = False
+    aguardando_observacao = False
+    buffer_observacao = []
+
     for linha in linhas:
         linha = linha.strip()
         if not linha:
@@ -34,6 +38,10 @@ def parse_items(linhas: List[str]) -> List[Dict]:
         match_item = padrao_item.match(linha)
         if match_item:
             if item_atual:
+                # Salva observação acumulada, se houver
+                if buffer_observacao:
+                    item_atual["observacao"] = " ".join(buffer_observacao).strip()
+                    buffer_observacao = []
                 itens.append(item_atual)
             partes = linha.split()
             qtd = partes[0]
@@ -51,29 +59,54 @@ def parse_items(linhas: List[str]) -> List[Dict]:
                 "acrescimo": [],
                 "decrescimo": [],
             }
+            aguardando_borda = False
+            aguardando_observacao = False
+            buffer_observacao = []
             continue
 
         if not item_atual:
             continue
 
-        # Borda
+        # Se linha anterior era 'BORDA:', pega borda agora
+        if aguardando_borda:
+            match_borda = padrao_borda.match(linha)
+            if match_borda:
+                item_atual["borda"] = match_borda.group(1).strip().title()
+            else:
+                item_atual["borda"] = linha.title()
+            aguardando_borda = False
+            continue
+
+        # Detecta se linha é só 'BORDA:'
+        if linha.upper() == "BORDA:":
+            aguardando_borda = True
+            continue
+
+        # Detecta se linha é só 'OBSERVAÇÕES:' ou 'OBSERVAÇÃO:'
+        if linha.upper() in ("OBSERVAÇÕES:", "OBSERVAÇÃO:"):
+            aguardando_observacao = True
+            continue
+
+        # Borda padrão (linha já vem com >>)
         match_borda = padrao_borda.match(linha)
         if match_borda:
             item_atual["borda"] = match_borda.group(1).strip().title()
             continue
-          
-        # Observação do cliente
+
+        # Observação do cliente padrão (pode ser multiline)
         match_observacao = padrao_observacao.match(linha)
         if match_observacao:
-            item_atual["observacao"] = match_observacao.group(1).strip().title()
+            buffer_observacao = [match_observacao.group(1).strip()]
+            aguardando_observacao = True
             continue
+
         # Acréscimo
         match_acrescimo = padrao_acrescimo.match(linha)
         if match_acrescimo:
             sabor = match_acrescimo.group(1).strip().title()
             item_atual["acrescimo"].append(sabor)
             continue
-          
+
         # Decrescimo
         match_decrescimo = padrao_decrescimo.match(linha)
         if match_decrescimo:
@@ -93,7 +126,22 @@ def parse_items(linhas: List[str]) -> List[Dict]:
             item_atual["preco"] = linha
             continue
 
+        # Se está acumulando observação, adiciona linha
+        if aguardando_observacao:
+            # Se a linha indica início de outro campo, para de acumular observação
+            if re.match(r"^(TOTAL ITENS:|TAXA DE ENTREGA:|VALOR DO PEDIDO:|FORMA DE PAGAMENTO:|BANDEIRA DO CARTÃO:|TEMPO P/ ENTREGA:)", linha, re.IGNORECASE):
+                aguardando_observacao = False
+                item_atual["observacao"] = " ".join(buffer_observacao).strip()
+                buffer_observacao = []
+                # continue para processar essa linha normalmente
+            else:
+                buffer_observacao.append(linha)
+                continue
+
+    # Salva último item
     if item_atual:
+        if buffer_observacao:
+            item_atual["observacao"] = " ".join(buffer_observacao).strip()
         itens.append(item_atual)
 
     return itens
