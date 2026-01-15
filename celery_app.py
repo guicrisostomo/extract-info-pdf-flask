@@ -15,4 +15,4 @@ app.conf.update(
     enable_utc=True,
 )
 
-app.autodiscover_tasks(['tasks', 'tasks.fila_celery.reatribuir_entregas_para_motoboy_ocioso'])
+app.autodiscover_tasks(['tasks', 'tasks.fila_celery.reatribuir_entregas_para_motoboy_ocioso', 'tasks.fila_celery.otimizar_rota_para_motoboy'])

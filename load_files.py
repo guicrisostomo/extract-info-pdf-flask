@@ -12,4 +12,5 @@ logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+OPENROUTE_API_KEY = os.getenv("OPENROUTE_API_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) # type: ignore

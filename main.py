@@ -600,7 +600,7 @@ def marcar_entrega_concluida(order_id: int):
     return {"status": "ok", "message": "Entrega marcada como concluída"}
 @app.post("/upload-planilha/")
 async def upload_planilha_excel(file: UploadFile = File(...)):
-    if not file.filename == None and file.filename.endswith(".xlsx"):
+    if file.filename is None or not file.filename.endswith(".xlsx"):
         return JSONResponse(status_code=400, content={"error": "Arquivo deve ser .xlsx"})
 
     contents = await file.read()
@@ -641,11 +641,20 @@ async def upload_planilha_excel(file: UploadFile = File(...)):
 
                 created_variations[key] = id_variation
 
+            id_variation = created_variations[key]
+
+            # NOVA VERIFICAÇÃO: Produto já existe com mesmo nome, categoria e tamanho?
+            produto_existente = supabase.table("products").select("*") \
+                .eq("name", nome).eq("id_variation", id_variation).execute()
+            if produto_existente.data:
+                print(f"Produto '{nome}' já existe na categoria '{subcategoria}' e tamanho '{tamanho}'. Ignorando.")
+                continue
+
             # Insere o produto
             product = {
                 "name": nome,
                 "price": float(preco),
-                "id_variation": created_variations[key]
+                "id_variation": id_variation
             }
 
             supabase.table("products").insert(product).execute()
@@ -655,8 +664,8 @@ async def upload_planilha_excel(file: UploadFile = File(...)):
 
 @app.post("/upload/")
 async def upload_planilha(file: UploadFile = File(...)):
-    if not file.filename == None and file.filename.endswith(".xlsx"):
-        return JSONResponse(status_code=400, content={"error": "Arquivo deve ser .xlsx"})
+    if file.filename is None or not file.filename.endswith(".xlsx"):
+      return JSONResponse(status_code=400, content={"error": "Arquivo deve ser .xlsx"})
 
     contents = await file.read()
     df = pd.read_excel(BytesIO(contents))
@@ -712,6 +721,13 @@ async def upload_planilha(file: UploadFile = File(...)):
 
         # Recuperar o ID da variação
         id_variation = created_variations.get(subcategoria)
+
+        # NOVA VERIFICAÇÃO: Produto já existe nessa variação?
+        produto_existente = supabase.table("products").select("*") \
+            .eq("name", nome_produto).eq("id_variation", id_variation).execute()
+        if produto_existente.data:
+            print(f"Produto '{nome_produto}' já existe na variação '{subcategoria}'. Ignorando.")
+            continue
 
         # Criar o produto
         product_data = {

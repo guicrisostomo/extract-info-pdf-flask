@@ -68,6 +68,7 @@ class RoterizacaoInput(BaseModel):
     api_key: str
     usuario_uids: Optional[List[uuid.UUID]] = []  # Lista de UUIDs dos motoboys
     capacidade_maxima: int = 4
+    
 
     def to_dict(self):
         """Converte o objeto para um dicionário serializável em JSON."""
